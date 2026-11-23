@@ -33,6 +33,7 @@ REQUIRED_FIELD_MISSING = "REQUIRED_FIELD_MISSING"
 RETRIEVAL_NO_MATCH = "RETRIEVAL_NO_MATCH"
 CLAIM_AMBIGUOUS = "CLAIM_AMBIGUOUS"
 FEATURE_UNVERIFIABLE = "FEATURE_UNVERIFIABLE"
+FEATURE_EXTRACTION_FAILED = "FEATURE_EXTRACTION_FAILED"
 SOURCE_AUTHORITY_UNRESOLVED = "SOURCE_AUTHORITY_UNRESOLVED"
 UNIT_NOT_RESOLVABLE = "UNIT_NOT_RESOLVABLE"
 VALUE_MISMATCH = "VALUE_MISMATCH"
@@ -525,7 +526,29 @@ def evaluate_claim(
     as_of: datetime,
 ) -> tuple[ClaimEvaluation | None, str | None]:
     """Evaluate one claim. Returns (evaluation, ambiguity_code_or_None)."""
-    features = extract_features(claim.text, caller_field_hint=claim.field_name)
+    # Extraction must never crash verification: a pathological claim text is a
+    # claim-level safe failure (UNRESOLVED), not a stack trace (§5E: verification
+    # failure => abstain; §9 safe failures).
+    try:
+        features = extract_features(claim.text, caller_field_hint=claim.field_name)
+    except Exception:
+        features = ClaimFeatures(claim_type="unmapped")
+        return (
+            ClaimEvaluation(
+                claim=claim,
+                features=features,
+                evaluation_status="UNRESOLVED",
+                deterministic_verdict=None,
+                reasons=[FEATURE_EXTRACTION_FAILED],
+                rule_ids=[RULE_SUPPORT_CONTRACT],
+                evidence_ids=[],
+                evidence_set_digest=evidence_set_digest(retrieved_records),
+                elements=[],
+                materiality=claim.materiality,
+                materiality_origin="caller",
+            ),
+            None,
+        )
 
     # Unsupported reasoning types are never forced through generic regex (§5B).
     if features.unsupported_reasoning or features.claim_type == "unmapped":
