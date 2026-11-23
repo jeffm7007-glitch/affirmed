@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+# IMPLEMENTATION_PLAN.md intentionally uncommitted per v4 spec §15.1
+IMPLEMENTATION_PLAN.md

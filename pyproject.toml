@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "affirmed-mcp"
+version = "0.1.0"
+description = "Evidence-checking MCP server and CLI for AI agents. Deterministic verifier, optional semantic advisory, inspectable receipts."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "ProPlum Network" }]
+keywords = ["evidence", "verification", "mcp", "agents", "claims"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+# Base package: zero runtime dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+# Official MCP SDK interop (optional; a vendored minimal stdio transport ships in-base).
+mcp = ["mcp>=1.8.0"]
+# Marker extra for future provider libraries. Live advisory currently uses stdlib urllib only.
+semantic = []
+
+[project.scripts]
+affirmed-mcp = "affirmed_mcp.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["affirmed_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
