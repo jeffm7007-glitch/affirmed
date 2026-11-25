@@ -45,6 +45,7 @@ def demo_records() -> list[dict[str, Any]]:
             "tags": ["towing", "availability"],
             "field_name": "towing",
             "field_type": "availability",
+            "field_value": {"always": True},
             "availability_schedule": {"always": True, "notes": "24/7/365"},
         },
         {
@@ -84,6 +85,7 @@ def demo_records() -> list[dict[str, Any]]:
             "tags": ["coverage"],
             "field_name": "service_area",
             "field_type": "geography",
+            "field_value": {"regions": [{"country": "US", "state": "FL", "city": "Tampa", "county": "Hillsborough"}]},
             "geo_scope": {"regions": [{"country": "US", "state": "FL", "city": "Tampa", "county": "Hillsborough"}]},
         },
         {
@@ -151,7 +153,10 @@ def build_demo_db(path: str) -> str:
                 value = record.get(field)
                 if value is None:
                     continue
-                if isinstance(value, (dict, list)):
+                # JSON-encode structured columns and every non-string (numbers,
+                # bools, objects) so the read path's _parse_json_column
+                # round-trips cleanly (§6A). Plain text columns stay raw.
+                if field in ("tags", "field_value", "availability_schedule", "geo_scope", "quantifier_scope", "exceptions") or not isinstance(value, str):
                     value = json.dumps(value, sort_keys=True)
                 cols.append(field)
                 vals.append(value)
