@@ -187,7 +187,9 @@ class VendoredStdioServer:
         method = message.get("method")
         if not isinstance(method, str):
             raise _JsonRpcError(INVALID_REQUEST, "missing method")
-        if "id" not in message:  # notification — never a response
+        if "id" not in message:  # notification — acknowledge silently, never a response
+            return None
+        if method.startswith("notifications/"):
             return None
         handler = self._handlers.get(method)
         if handler is None:
