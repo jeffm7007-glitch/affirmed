@@ -167,6 +167,10 @@ class ScriptedAdvisor:
         self._script = script
 
     def advise(self, claim_text: str, evidence: list[tuple[str, str]]) -> tuple[dict[str, Any], str]:
+        # Scripted output must pass the SAME strict validation as live output
+        # (spec §10): the body is returned clean; the simulation label lives
+        # only at the semantic-block level (run_advisory sets simulated_label),
+        # never inside the validated advisory payload.
         body = self._script.get(claim_text, {
             "advisory_result": "NO_ADVISORY_RESULT",
             "cited_evidence_ids": [],
@@ -174,9 +178,7 @@ class ScriptedAdvisor:
             "injection_suspected": False,
             "limitations": ["scripted demo advisor"],
         })
-        canonical_body = dict(body)
-        canonical_body["simulation_label"] = SCRIPTED_LABEL
-        return canonical_body, json.dumps(canonical_body, sort_keys=True)
+        return dict(body), json.dumps(body, sort_keys=True)
 
 
 class OpenRouterAdvisor:

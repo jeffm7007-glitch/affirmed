@@ -178,6 +178,16 @@ def extract_features(claim_text: str, caller_field_hint: str | None = None) -> C
     if geos:
         rules.append(RULE_GEO_TOKEN)
 
+    # Suppress bare-number tokens that are part of a recognised availability
+    # shorthand (e.g. the "24" and "7" inside "24/7") so they are not
+    # double-counted as independent numeric assertions.
+    _AVAILABILITY_SHORTHAND_RES = [
+        re.compile(r"\b24\s*/\s*7\b"),
+        re.compile(r"\b24\s*[-\u2013]\s*7\b"),
+        re.compile(r"\b24\s+hours?\b", re.IGNORECASE),
+        re.compile(r"\b24\s+hrs?\b", re.IGNORECASE),
+    ]
+
     numbers: list[ExtractedNumber] = []
     seen_spans: list[tuple[int, int]] = []
     for match in CURRENCY_RE.finditer(text):
@@ -190,10 +200,19 @@ def extract_features(claim_text: str, caller_field_hint: str | None = None) -> C
         numbers.append(ExtractedNumber(float(match.group(1).replace(",", "")), unit))
         seen_spans.append(match.span())
     if not numbers:
-        bare = BARE_NUMBER_RE.findall(text)
+        # Determine spans consumed by availability shorthand before scanning
+        # for bare numbers so we don't treat "24/7" as numeric claims 24 and 7.
+        availability_spans: list[tuple[int, int]] = []
+        for _rx in _AVAILABILITY_SHORTHAND_RES:
+            availability_spans.extend(m.span() for m in _rx.finditer(text))
+        bare = [
+            m
+            for m in BARE_NUMBER_RE.finditer(text)
+            if not any(s <= m.start() and m.end() <= e for s, e in availability_spans)
+        ]
         if bare and (quantifier in ("at least", "up to") or availability or "hour" in lower):
-            for b in bare:
-                numbers.append(ExtractedNumber(float(b.replace(",", "")), None))
+            for m in bare:
+                numbers.append(ExtractedNumber(float(m.group(1).replace(",", "")), None))
     if numbers:
         rules.append(RULE_NUMERIC_TOKEN)
 
@@ -206,6 +225,20 @@ def extract_features(claim_text: str, caller_field_hint: str | None = None) -> C
             for f in fields:
                 if f not in candidate_fields:
                     candidate_fields.append(f)
+    # Compound candidate fields: when a service keyword AND a price/cost
+    # keyword are both present, generate combined field names like
+    # "towing_price" so the verifier can match compound evidence fields.
+    _SERVICE_KEYWORDS = {"towing", "tow", "lockout", "jump", "battery", "fuel", "tire", "flat", "winch"}
+    _PRICE_KEYWORDS = {"price", "cost", "fee", "charge"}
+    found_services = [k for k in _SERVICE_KEYWORDS if k in lower]
+    found_prices = [k for k in _PRICE_KEYWORDS if k in lower]
+    if found_services and found_prices:
+        for svc in found_services:
+            # Generate all common price/cost compound forms.
+            for compound_suffix in ("price", "cost", "fee"):
+                compound = f"{svc}_{compound_suffix}" if svc != "tow" else f"towing_{compound_suffix}"
+                if compound not in candidate_fields:
+                    candidate_fields.append(compound)
 
     unsupported_reasoning = any(marker in lower for marker in UNSUPPORTED_REASONING_MARKERS)
     if unsupported_reasoning:

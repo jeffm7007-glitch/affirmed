@@ -191,15 +191,47 @@ def _subject_matches(record: dict[str, Any], claim: ClaimInput) -> bool:
 
 
 def _candidate_records(records: list[dict[str, Any]], claim: ClaimInput, features: ClaimFeatures, as_of: datetime) -> list[dict[str, Any]]:
-    """Applicable records: subject matches, temporally applicable, has typed field."""
+    """Applicable records: subject matches, temporally applicable, has typed field.
+
+    candidate_fields is a heuristic priority signal, not a strict allow-list.
+    When the strict filter matches nothing we fall back to all applicable
+    records.
+    """
     applicable = [
         r
         for r in records
         if _subject_matches(r, claim) and _record_applicable_at(r, as_of) and r.get("field_name")
     ]
-    if features.candidate_fields:
-        field_filtered = [r for r in applicable if r.get("field_name") in features.candidate_fields]
-        return field_filtered if field_filtered else applicable
+    if not features.candidate_fields:
+        # No candidate fields extracted: we cannot tell which service the
+        # claim is about.  Only consider records whose field_name is NOT
+        # service-specific, so that (e.g.) a towing availability record is
+        # never matched against a generic "customer support" claim.
+        _ALL_SERVICE_TOKENS = {
+            "towing", "tow", "lockout", "jump", "battery", "fuel", "tire",
+            "flat", "winch", "roadside", "dispatch",
+        }
+        generic_only = [
+            r for r in applicable
+            if not any(tok in str(r.get("field_name", "")).lower() for tok in _ALL_SERVICE_TOKENS)
+        ]
+        return generic_only
+    # Strict filter first.
+    field_filtered = [r for r in applicable if r.get("field_name") in features.candidate_fields]
+    if field_filtered:
+        return field_filtered
+    # Relaxed: include records whose field_name shares a service-keyword
+    # prefix with the candidate fields.
+    _GENERIC = {"price", "fee", "cost", "pricing", "availability", "business_hours",
+                "service_availability", "services", "service_area", "coverage",
+                "geo_scope", "licensing", "license_status", "insurance", "insurance_status"}
+    service_tokens = [t for t in features.candidate_fields if t not in _GENERIC]
+    if service_tokens:
+        relaxed = [
+            r for r in applicable
+            if any(tok in str(r.get("field_name", "")) for tok in service_tokens)
+        ]
+        return relaxed  # may be empty — caller handles no-candidate case
     return applicable
 
 
@@ -389,7 +421,7 @@ def _eval_quantifier(features: ClaimFeatures, candidates: list[dict[str, Any]], 
 def _eval_geo(claim_region: str, features: ClaimFeatures, candidates: list[dict[str, Any]], policy: Policy) -> ElementResult:
     typed = [r for r in candidates if r.get("field_type") == "geography"]
     rule_ids = [RULE_GEO_COMPARISON, RULE_NO_TEXT_UPGRADE, RULE_SUPPORT_CONTRACT]
-    target = claim_region.strip().lower()
+    target = claim_region.strip().rstrip(".,;!?).").strip().lower()
     if not typed:
         return ElementResult(
             element="scope", kind="geography", status="UNSUPPORTED",
