@@ -559,6 +559,10 @@ class AffirmedService:
 
 
 def validate_tool_payload(tool: str, payload: Any) -> dict[str, Any]:
+    if tool == "get_source_status":
+        if payload:
+            raise invalid_input("get_source_status takes no arguments")
+        return {}
     allowed = {"retrieve_evidence": RETRIEVE_FIELDS, "verify_answer": VERIFY_FIELDS}.get(tool)
     if allowed is None:
         raise invalid_input(f"unknown tool {tool!r}")
