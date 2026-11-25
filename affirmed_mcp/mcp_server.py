@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from . import SOFTWARE_VERSION
 from .config import Policy
-from .errors import ServiceError, internal_error
+from .errors import ServiceError, internal_error, invalid_input
 from .service import AffirmedService, validate_tool_payload
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -32,7 +32,7 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
-_TOOL_SPECS: list[dict[str, Any]] = [
+_TOOL_SPEC_LIST: list[dict[str, Any]] = [
     {
         "name": "retrieve_evidence",
         "description": (
@@ -83,7 +83,8 @@ _TOOL_SPECS: list[dict[str, Any]] = [
     },
 ]
 
-_TOOL_NAMES = [t["name"] for t in _TOOL_SPECS]
+_TOOL_SPECS: dict[str, dict[str, Any]] = {spec["name"]: spec for spec in _TOOL_SPEC_LIST}
+_TOOL_NAMES = list(_TOOL_SPECS)
 
 
 def build_service_from_env() -> AffirmedService:
@@ -120,7 +121,7 @@ class VendoredStdioServer:
         self._writer = writer or sys.stdout
         self._handlers: dict[str, Callable[[Any], Any]] = {
             "initialize": self._initialize,
-            "tools/list": lambda _p: {"tools": _TOOL_SPECS},
+            "tools/list": lambda _p: {"tools": list(_TOOL_SPECS.values())},
             "tools/call": self._tools_call,
             "ping": lambda _p: {},
         }
@@ -137,43 +138,42 @@ class VendoredStdioServer:
             raise _JsonRpcError(INVALID_PARAMS, "tools/call params must be an object")
         name = params.get("name")
         arguments = params.get("arguments") or {}
-        if name not in _TOOL_NAMES:
-            raise _JsonRpcError(INVALID_PARAMS, f"unknown tool {name!r}")
+        if name not in _TOOL_SPECS:
+            return self._tool_error(invalid_input(
+                f"unknown tool {name!r}", tool=name).to_envelope())
         if not isinstance(arguments, dict):
             raise _JsonRpcError(INVALID_PARAMS, "arguments must be an object")
         # Unknown top-level fields rejected as INVALID_INPUT before dispatch (#40/#51).
         try:
             payload = validate_tool_payload(name, arguments)
         except ServiceError as exc:
-            return {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": exc.to_envelope()}, sort_keys=True)}
-                ],
-                "isError": True,
-            }
+            return self._tool_error(exc.to_envelope())
         try:
             result = _call_tool(self.service, name, payload)
         except ServiceError as exc:
             # Stable documented error envelope, safe for ordinary clients (#46).
-            return {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": exc.to_envelope()}, sort_keys=True)}
-                ],
-                "isError": True,
-            }
+            return self._tool_error(exc.to_envelope())
         except Exception as exc:  # noqa: BLE001 — never leak stack traces or messages
             envelope = internal_error(details={"reason": type(exc).__name__}).to_envelope()
-            return {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": envelope}, sort_keys=True)}
-                ],
-                "isError": True,
-            }
+            return self._tool_error(envelope)
         return {
             "content": [
                 {"type": "text", "text": json.dumps(result, sort_keys=True, ensure_ascii=False)}
             ],
+            "structuredContent": result,
             "isError": False,
+        }
+
+    @staticmethod
+    def _tool_error(envelope: dict[str, Any]) -> dict[str, Any]:
+        """Tool-level error: stable documented envelope, safe for ordinary clients (#46)."""
+        body = {"error": envelope}
+        return {
+            "content": [
+                {"type": "text", "text": json.dumps(body, sort_keys=True)}
+            ],
+            "structuredContent": body,
+            "isError": True,
         }
 
     def _send(self, message: dict[str, Any]) -> None:
@@ -181,7 +181,16 @@ class VendoredStdioServer:
         self._writer.flush()
 
     def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
-        """Handle one decoded message; returns the response dict or None (notification)."""
+        """Handle one decoded message; returns the full JSON-RPC response envelope
+        (``result`` or ``error``) or None for notifications."""
+        request_id = message.get("id") if isinstance(message, dict) else None
+        try:
+            return self._dispatch(message, request_id)
+        except _JsonRpcError as exc:
+            return {"jsonrpc": JSONRPC, "id": request_id,
+                    "error": {"code": exc.code, "message": exc.message}}
+
+    def _dispatch(self, message: dict[str, Any], request_id: Any) -> dict[str, Any] | None:
         if not isinstance(message, dict) or message.get("jsonrpc") != JSONRPC:
             raise _JsonRpcError(INVALID_REQUEST, "not a JSON-RPC 2.0 request object")
         method = message.get("method")
@@ -194,7 +203,8 @@ class VendoredStdioServer:
         handler = self._handlers.get(method)
         if handler is None:
             raise _JsonRpcError(METHOD_NOT_FOUND, f"unknown method {method!r}")
-        return handler(message.get("params"))
+        return {"jsonrpc": JSONRPC, "id": request_id,
+                "result": handler(message.get("params"))}
 
     def serve_forever(self) -> int:
         for line in self._reader:
@@ -207,15 +217,9 @@ class VendoredStdioServer:
                 self._send({"jsonrpc": JSONRPC, "id": None,
                             "error": {"code": PARSE_ERROR, "message": "parse error"}})
                 continue
-            request_id = message.get("id") if isinstance(message, dict) else None
-            try:
-                result = self.handle_message(message)
-            except _JsonRpcError as exc:
-                self._send({"jsonrpc": JSONRPC, "id": request_id,
-                            "error": {"code": exc.code, "message": exc.message}})
-                continue
-            if result is not None:
-                self._send({"jsonrpc": JSONRPC, "id": request_id, "result": result})
+            response = self.handle_message(message)
+            if response is not None:
+                self._send(response)
         return 0
 
 
@@ -241,7 +245,7 @@ def build_sdk_server(service: AffirmedService | None = None):
     svc = service or build_service_from_env()
     mcp = FastMCP("affirmed-mcp")
 
-    @mcp.tool(name="retrieve_evidence", description=_TOOL_SPECS[0]["description"])
+    @mcp.tool(name="retrieve_evidence", description=_TOOL_SPECS["retrieve_evidence"]["description"])
     def retrieve_evidence(query: str, limit: int | None = None,
                           expected_source_snapshot_id: str | None = None,
                           as_of: str | None = None) -> dict[str, Any]:
@@ -249,7 +253,7 @@ def build_sdk_server(service: AffirmedService | None = None):
                                      expected_source_snapshot_id=expected_source_snapshot_id,
                                      as_of=as_of)
 
-    @mcp.tool(name="verify_answer", description=_TOOL_SPECS[1]["description"])
+    @mcp.tool(name="verify_answer", description=_TOOL_SPECS["verify_answer"]["description"])
     def verify_answer(answer: str, claims: list | None = None,
                       audit_mode: str | None = None,
                       expected_source_snapshot_id: str | None = None,
@@ -263,7 +267,7 @@ def build_sdk_server(service: AffirmedService | None = None):
                                  claims_source=claims_source,
                                  suggestion_set_digest=suggestion_set_digest)
 
-    @mcp.tool(name="get_source_status", description=_TOOL_SPECS[2]["description"])
+    @mcp.tool(name="get_source_status", description=_TOOL_SPECS["get_source_status"]["description"])
     def get_source_status() -> dict[str, Any]:
         return svc.get_source_status()
 
