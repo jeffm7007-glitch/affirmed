@@ -49,6 +49,9 @@ def open_source(path: str) -> sqlite3.Connection:
         conn = sqlite3.connect(uri, uri=True, isolation_level=None, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA foreign_keys=ON")
+        # Fail closed on corrupt/unreadable headers instead of lazily erroring later.
+        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
     except sqlite3.Error as exc:
         raise ServiceError(
             SOURCE_ERROR, "could not open source read-only", retryable=False,

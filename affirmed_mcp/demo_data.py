@@ -166,6 +166,11 @@ def build_demo_db(path: str) -> str:
                 vals,
             )
         conn.commit()
+        # WAL persists in the database header: later connections (including
+        # read-only opens) report journal_mode=wal and readers do not block
+        # a concurrent writer's checkpoint (#26).
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
     return path
