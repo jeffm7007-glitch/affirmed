@@ -1,112 +1,83 @@
-# Affirmed
+# Affirmed MCP
 
-**Evidence-checking MCP server and CLI for AI agents.** A deterministic
-verification engine with an optional, strictly isolated semantic advisory —
-and inspectable receipts for every run.
+**Evidence-checking MCP server and CLI for AI agents.** Deterministic verifier, optional semantic advisory, inspectable receipts.
 
-- Deterministic verdicts from a pinned, read-only evidence source — the same
-  inputs always produce the same result digests.
-- Abstains on ambiguous, incomplete, or unsupported claims instead of
-  guessing; coverage and materiality are explicit in every receipt.
-- Zero runtime dependencies (Python 3.10+, standard library only); zero
-  network access in deterministic mode, including telemetry.
+Affirmed answers one question: *can this specific claim be supported, contradicted, or neither — by this specific evidence source, right now, reproducibly?* The deterministic core has **zero runtime dependencies** and makes **zero outbound network calls** (including telemetry). A semantic advisor (OpenRouter) is an optional, strictly isolated second opinion that can never change deterministic results.
+
+## Why
+
+AI agents make claims. Affirmed lets them check each atomic claim against a versioned, read-only evidence database and returns a **receipt** — digests, versions, rules, and limitations — that a human, an auditor, or another agent can re-verify byte-for-byte.
 
 ## Quickstart
 
 ```bash
-# Run the self-contained demo (temporary DB, Scenarios A–D, scripted advisor double)
+# 1. Run the fictional demo (Scenarios A–D, zero network, scripted advisor)
 uvx affirmed-mcp demo
 
-# Print the default policy and a ready-to-paste MCP client config block
-uvx affirmed-mcp install-config --print
+# 2. Print the default local policy
+affirmed-mcp install-config --print
 
-# Inspect the running server with the MCP inspector (requires the mcp extra)
-uvx --with affirmed-mcp[mcp] affirmed-mcp inspect
+# 3. Inspect the source snapshot status
+affirmed-mcp get-source-status   # add --source /path/to/evidence.db
 
-# Verify an answer against a set of atomic claims
-affirmed-mcp verify --answer answer.txt --claims claims.json
+# 4. Verify an answer against your own source
+echo -n "Towing costs $75." > /tmp/answer.txt
+export AFFIRMED_SOURCE_PATH=/path/to/evidence.db
+affirmed-mcp verify --file /tmp/answer.txt \
+  --claims '[{"claim_id":"c1","text":"Towing costs $75.","materiality":"material"}]'
 
-# Check the pinned source snapshot identity and freshness
-affirmed-mcp get-source-status --source evidence.db
+# 5. (optional) Serve over MCP stdio
+affirmed-mcp serve
+# or via MCP extra: pip install 'affirmed-mcp[mcp]'
 
-# Run the fictional 12-example demonstration set (NOT a benchmark)
-affirmed-mcp eval
+# 6. (optional) Launch the MCP inspector (requires the mcp extra, #64)
+affirmed-mcp inspect
 ```
 
-Point the server at an evidence database with the `AFFIRMED_SOURCE_PATH`
-environment variable (see `install-config --print` output).
+See **docs/security.md** for the threat model and **docs/ACCEPTANCE.md** for the criterion-by-criterion verification map.
+
+## The three tools
+
+| Tool | What it does |
+|---|---|
+| `retrieve_evidence` | Lexical retrieval over the configured source; returns records, scores, diagnostics, and a query-independent `source_snapshot_id`. |
+| `verify_answer` | Validates claims, retrieves evidence, evaluates each claim deterministically, optionally attaches a semantic advisory, and returns a receipt. |
+| `get_source_status` | Schema version, snapshot method/id, record count, file metadata. |
+
+There are exactly three tools. MCP requests cannot carry policy changes (no `policy_overrides`); local policy is file/env-only, validated at startup, and fails closed.
 
 ## Architecture
 
-Affirmed layers a small, fully deterministic pipeline over a pinned SQLite
-evidence source: a canonical read-only source adapter snapshots the database
-in a single transaction and stamps it with a full-export digest identity;
-lexical BM25 retrieval fetches candidate records; a claims normalizer turns
-submitted answer text into atomic claims with typed features (availability,
-numeric+unit, date, boolean/string match, negation, geography, quantifier
-scope); the verifier evaluates each claim against typed evidence fields
-under a versioned support contract and conservative composition rules, never
-raising assurance beyond what the evidence states; an optional semantic
-advisory (two-key opt-in, network only when explicitly enabled) may suggest
-but can never change an evidence-backed verdict; and every run emits a
-complete, self-contained receipt whose deterministic digest is byte-identical
-across processes for identical pinned inputs. The MCP surface exposes exactly
-three tools — `retrieve_evidence`, `verify_answer`, `get_source_status` —
-over a vendored ND-JSON JSON-RPC stdio transport, with an optional path via
-the official `mcp` SDK when the `mcp` extra is installed.
+`affirmed_mcp/` is a stdlib-only package:
+
+- `config.py` — versioned `Policy`, validated once at load, no per-request overrides.
+- `source.py` — read-only SQLite adapter (`mode=ro`, `query_only=ON`); one consistent read transaction per operation; full-export or trusted-version snapshot; corrupt/mismatched sources fail closed.
+- `schema.py` — canonical `EvidenceRecord` model with typed-field validation (units, ISO dates, availability schedules); unknown columns never interpreted.
+- `retrieval.py` — deterministic lexical index, snapshot-keyed cache, documented non-probability scores.
+- `claims.py` / `features.py` / `verifier.py` — atomic claim contract; rule-based feature extraction (numbers, units, negation, dates, geography, availability, quantifiers); typed-field verdict composition. Text overlap alone never verifies.
+- `semantic.py` — two-key opt-in advisory (OpenRouter, HTTPS); output schema-validated, fabricated evidence IDs rejected, injection signals recorded, failure recorded never propagated.
+- `receipt.py` / `receipt_verify.py` — canonical receipts with deterministic digests (timestamps excluded) and independent re-verification.
+- `service.py` — the three-tool surface, pre-validation before any state, stable error envelopes.
+- `cli.py` — `demo`, `suggest-claims`, `install-config`, `inspect`, `get-source-status`, `verify`, `eval`.
+- `mcp_server.py` — vendored ND-JSON JSON-RPC stdio transport (~150 lines); optional FastMCP path when the `mcp` extra is installed.
+
+Verdict semantics: `SUPPORTED` requires an applicable typed field for every condition in the claim (§5B contract). Missing typed fields are never upgraded by lexical similarity or advisory opinion. Unsupported reasoning types (superlatives, comparisons) return `FEATURE_UNVERIFIABLE`, never a regex guess.
 
 ## Limitations
 
-- BM25 lexical retrieval only; paraphrase gaps are expected and surface as
-  abstentions rather than being chased with a vector database.
-- Atomicity/ambiguity heuristics are documented deterministic rules, not
-  language understanding; uncertain cases route to review outcomes.
-- Deterministic claim-type coverage is a closed set (availability,
-  numeric+unit, date, boolean/string field match, negation, geography,
-  quantifier scope); other reasoning types return `FEATURE_UNVERIFIABLE`.
-- `trusted_source_version` snapshot trust depends on the configured
-  maintainer's discipline, and this is disclosed in receipts.
-- The vendored MCP transport implements the core JSON-RPC surface
-  (initialize, tools/list, tools/call, ping); the official-SDK path is
-  available via the `mcp` extra.
-- The demo and eval sets are fictional illustrations, not measurements of
-  production reliability.
+The demo provider, data, and 12-example eval set are **fictional**; the eval set is a demonstration, not a benchmark. Affirmed does not measure hallucination rates. Retrieval is lexical, not semantic; it is a ranking signal, not relevance truth. Claim-checking coverage is caller-scoped (`submitted_claims_only`) — overall PASS never implies whole-answer verification, and the MVP never emits `reviewed_complete`. Conflict handling defaults to deterministic-first: conflicting applicable evidence yields documented abstention (`EVIDENCE_CONFLICT` / `UNRESOLVED`) rather than authority-weighted guessing. Trusted-source-version snapshots trust the source maintainer's version identifier (disclosed in receipts). Full Ignorance2.Fact API compatibility is not claimed without supplied external schemas/fixtures; the canonical `EvidenceRecord` adapter is tested independently. Source file-age is not evidence freshness and is disabled by default.
 
-## Security
+## Security summary
 
-Deterministic mode makes no outbound calls at all (the test suite blocks
-sockets and asserts this). The evidence database is opened read-only with
-parameterized queries only; malformed or schema-mismatched sources fail
-closed. Errors are stable documented envelopes — no stack traces, no
-secrets. The semantic advisory requires both an API key and an explicit
-opt-in flag, sends only minimized claim/evidence snippets, and never places
-keys in receipts, logs, or tool arguments. See
-[docs/security.md](docs/security.md) for the full threat model.
+Read-only by construction (no write path in the MCP surface); fail-closed on schema mismatch, corruption, or malformed input; no arbitrary SQL reachable; semantic calls are HTTPS-only with disclosed payload digests and no credentials or unrelated context; no telemetry, no receipt persistence, no debug payload logging. See **docs/security.md**.
+
+## Development
+
+```bash
+pip install pytest   # dev-only; runtime is stdlib-only
+python3 -m pytest
+```
 
 ## License
 
-MIT. See below.
-
-```
-MIT License
-
-Copyright (c) 2026 ProPlum Network
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+MIT

@@ -275,7 +275,7 @@ class AffirmedService:
         # --- Claim contract -------------------------------------------- #
         parsed, abstention = parse_and_validate_claims(claims, self.policy)
         if abstention is not None:
-            return self._abstention_receipt(
+            receipt = self._abstention_receipt(
                 abstention=abstention,
                 answer_digest_value=answer_digest_value,
                 submitted_claims_digest_value=None,
@@ -287,6 +287,7 @@ class AffirmedService:
                 as_of_str=as_of_str,
                 timestamp=timestamp,
             )
+            return {"contract_version": CONTRACT_VERSION, "receipt": receipt, "warnings": warnings}
         assert parsed is not None
 
         if isinstance(claims, list) and len(claims) > self.policy.verify_max_claims:
@@ -305,7 +306,7 @@ class AffirmedService:
 
         atomicity = check_atomicity(parsed)
         if atomicity is not None:
-            return self._abstention_receipt(
+            receipt = self._abstention_receipt(
                 abstention=atomicity,
                 answer_digest_value=answer_digest_value,
                 submitted_claims_digest_value=submitted_claims_digest(parsed),
@@ -315,6 +316,7 @@ class AffirmedService:
                 as_of_str=as_of_str,
                 timestamp=timestamp,
             )
+            return {"contract_version": CONTRACT_VERSION, "receipt": receipt, "warnings": warnings}
 
         # --- Source snapshot + verification ----------------------------- #
         conn = open_source(self.policy.source_path or "")
@@ -536,6 +538,7 @@ class AffirmedService:
         conn = open_source(self.policy.source_path or "")
         with SourceSession(conn, self.policy) as session:
             snapshot = session.resolve_snapshot(self.policy.source_path or "")
+            source_schema_version = schema_version(conn)
         conn.close()
         freshness = self._freshness(self.policy.source_path or "", snapshot["records"], self.policy, _utc_now(), warnings)
         records = snapshot["records"] or []
@@ -547,7 +550,7 @@ class AffirmedService:
             "snapshot_method": snapshot["snapshot_method"],
             "snapshot_trust": snapshot["snapshot_trust"],
             "file_mtime": freshness["source_file"].get("file_mtime"),
-            "schema_version": schema_version(conn),
+            "schema_version": source_schema_version,
             "evidence_publication_date_coverage": {"min": published[0], "max": published[-1]} if published else None,
             "evidence_effective_date_coverage": {"min": effective[0], "max": effective[-1]} if effective else None,
             "file_staleness_warning": freshness["file_staleness_warning"],
